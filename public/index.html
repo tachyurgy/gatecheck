@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gatecheck — agent steps in CI that cannot skip their checkpoint</title>
+<style>
+  :root{--bg:#fbfbfb;--ink:#14161a;--muted:#5f6873;--line:#e4e6e9;--card:#fff;
+        --accent:#4a3f8f;--ok:#1d6b4a;--bad:#a23726;--warn:#96671b;
+        --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#101115;--ink:#eef0f4;--muted:#959ea9;--line:#25272e;--card:#17191e;
+          --accent:#9b8ee0;--ok:#79c89e;--bad:#e2907c;--warn:#d6ac63;}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:940px;margin:0 auto;padding:38px 20px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:22px}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+     font-family:var(--mono);margin:26px 0 10px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
+  button{padding:8px 13px;border:1px solid var(--accent);border-radius:7px;
+         background:transparent;color:var(--accent);cursor:pointer;font:inherit;font-size:13.5px}
+  button.primary{background:var(--accent);color:#fff}
+  .step{display:flex;gap:12px;align-items:flex-start;background:var(--card);
+        border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin:8px 0}
+  .dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:0 0 9px}
+  .passed .dot{background:var(--ok)} .escalated .dot{background:var(--bad)}
+  .skipped .dot{background:var(--muted)} .replayed .dot{background:var(--warn)}
+  .step b{font-size:15px}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
+  .reasons{margin-top:7px;font-family:var(--mono);font-size:12.5px;color:var(--bad);
+           white-space:pre-wrap;word-break:break-word}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;
+        border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px}
+  pre{font-family:var(--mono);font-size:12.5px;background:var(--card);border:1px solid var(--line);
+      border-radius:8px;padding:11px;overflow-x:auto;margin:6px 0 0;white-space:pre-wrap}
+  .note{color:var(--muted);font-size:13.5px;margin:8px 0 0}
+  .summary{font-family:var(--mono);font-size:12.5px}
+  code{font-family:var(--mono);font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Gatecheck</h1>
+  <p class="sub">Three agent steps in a build pipeline. Nothing crosses a checkpoint unvalidated, and no effect applies twice.</p>
+</header>
+
+<h2>Break a step on purpose</h2>
+<div class="row">
+  <button class="primary" onclick="go('clean')">clean run</button>
+  <button onclick="go('bad-shape')">missing field</button>
+  <button onclick="go('bad-confidence')">confidence 87 (not 0.87)</button>
+  <button onclick="go('hallucinated-file')">blames a file not in the diff</button>
+  <button onclick="go('flaky-agent')">agent wrong twice, right on the third</button>
+</div>
+<div class="row">
+  <button onclick="replay()">replay the same run id</button>
+  <button onclick="reset()">reset</button>
+  <span class="summary" id="summary"></span>
+</div>
+
+<h2>Steps</h2>
+<div id="steps"></div>
+
+<h2>Effects</h2>
+<pre id="effects">nothing yet</pre>
+<p class="note">The comment step's effect is keyed on the run id and content. Run the same id twice and the second is
+  <code>effect-replayed</code>: reported, not repeated. That is what makes a re-run of a failed pipeline safe.</p>
+</div>
+
+<script>
+const $ = i => document.getElementById(i);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let lastRunId = null;
+
+const CLASS = {passed:'passed', escalated:'escalated', skipped:'skipped', 'effect-replayed':'replayed'};
+
+async function go(mode, runId){
+  const id = runId || ('run-' + Math.random().toString(36).slice(2, 8));
+  lastRunId = id;
+  const d = await (await fetch('/api/run?mode=' + mode + '&runId=' + id)).json();
+
+  $('summary').innerHTML = 'run ' + esc(d.runId) + ' · ' +
+    (d.completed ? '<span style="color:var(--ok)">completed</span>'
+                 : '<span style="color:var(--bad)">halted, escalated to a human</span>') +
+    ' · effects applied this call: ' + d.effectsAppliedThisCall;
+
+  $('steps').innerHTML = d.steps.map(s =>
+    '<div class="step ' + (CLASS[s.status] || '') + '"><div class="dot"></div><div style="flex:1">' +
+    '<b>' + esc(s.stepId) + '</b><span class="pill">' + esc(s.status) + '</span>' +
+    (s.attempts ? '<span class="pill">' + s.attempts + ' attempt' + (s.attempts === 1 ? '' : 's') + '</span>' : '') +
+    (s.effectKey ? '<span class="pill">' + esc(s.effectKey) + '</span>' : '') +
+    (s.reasons.length ? '<div class="reasons">' + s.reasons.map(esc).join('\n') + '</div>' : '') +
+    '</div></div>').join('');
+
+  $('effects').textContent = (d.journal.length ? d.journal.join('\n') : 'no effects applied') +
+    '\n\neffect log keys: ' + JSON.stringify(d.effectLog);
+}
+
+function replay(){ if (lastRunId) go('clean', lastRunId); else go('clean'); }
+async function reset(){ await fetch('/api/reset'); lastRunId = null; $('steps').innerHTML = '';
+  $('effects').textContent = 'nothing yet'; $('summary').textContent = ''; }
+
+go('clean');
+</script>
+</body>
+</html>
